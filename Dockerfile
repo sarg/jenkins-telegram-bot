@@ -5,4 +5,4 @@ RUN pip install python-jenkins
 
 VOLUME /app
 WORKDIR /app
-CMD [ "python", "jenkinsbot.py" ]
+CMD python jenkinsbot.py
