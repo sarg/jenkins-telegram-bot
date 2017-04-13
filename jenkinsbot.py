@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler, JobQueue, Job
 from telegram import (InlineKeyboardMarkup, ReplyKeyboardHide,InlineKeyboardButton)
+from functools import partial
 import logging
+import time
 import jenkins
 from settings import *
 
@@ -29,13 +31,18 @@ def _match(item, cond):
 
 # Define a few command handlers. These usually take the two arguments bot and
 # update. Error handlers also receive the raised TelegramError object in error.
-def build(bot, update):
+def build(bot, update, job_queue):
     bname = update.message.text[7:]
     if not bname:
         bname = DEFAULT_JENKINS_QUERY
     jobs = [ [ InlineKeyboardButton(x['fullname'], callback_data=x['fullname'])] for x in server.get_jobs() if _match(x['fullname'], bname) ]
     if len(jobs) == 1:
-        update.message.reply_text("Building only job: %s %s" % _build(jobs[0][0].text))
+        job, params, build = _build(jobs[0][0].text)
+        msg = update.message.reply_text("Building only job: %s %s" % (job, params))
+
+        job_queue.put(Job(callback=checkBuild,
+                        interval=2.0,
+                        context=[build, msg]), next_t=0.0)
     else:
         update.message.reply_text('Which job?' + (' Shown only 5' if len(jobs)>5 else ''), reply_markup=InlineKeyboardMarkup(jobs[:5]))
 
@@ -43,22 +50,57 @@ def builds(bot, update):
     update.message.reply_text(server.get_running_builds())
 
 def _build(job):
-    params = [ p['parameterDefinitions'] for p in server.get_job_info(job)['actions'] if p.get('_class')=='hudson.model.ParametersDefinitionProperty' ]
+    params = [ p['parameterDefinitions']
+               for p in server.get_job_info(job)['actions']
+               if p.get('_class')=='hudson.model.ParametersDefinitionProperty'
+    ]
+
     if params:
-        params = { p['name']: p['defaultParameterValue']['value'] for p in params[0] if not p['type']=='PasswordParameterDefinition' }
+        params = { p['name']: p['defaultParameterValue']['value']
+                   for p in params[0]
+                   if not p['type']=='PasswordParameterDefinition'
+        }
     else:
         params = {}
 
+    build = server.get_job_info(job)
     server.build_job(job, params)
-    return (job, params)
+    return (job, params, build)
 
-def button(bot, update):
+def checkBuild(bot, job):
+    build, msg = job.context
+
+    try:
+        info = server.get_build_info(build['name'], build['nextBuildNumber'])
+
+        if not info['building']:
+            new_msg = "Build: %s\nFinished: %s" % (build['name'], info['result'])
+            job.schedule_removal()
+        else:
+            percent = 100. * (time.time()*1000 - info['timestamp']) / info['estimatedDuration']
+            new_msg = "Building: %s\n%d%% [%s]" % (build['name'], percent, '=' * round(percent/10))
+
+    except jenkins.NotFoundException:
+        new_msg = "Building: %s\nwaiting" % (build['name'])
+
+    if msg.text != new_msg:
+        msg.text = new_msg
+
+        bot.editMessageText(text=new_msg,
+                            chat_id=msg.chat_id,
+                            message_id=msg.message_id)
+
+def button(bot, update, job_queue):
     query = update.callback_query
-    job, params = _build(query.data)
+    job, params, build = _build(query.data)
+    job_queue.put(Job(callback=checkBuild,
+                      interval=2.0,
+                      context=[build, query.message]), next_t=0.0)
 
     bot.editMessageText(text="Building: %s %s" % (job, params),
                         chat_id=query.message.chat_id,
                         message_id=query.message.message_id)
+
 
 def error(bot, update, error):
     logger.warn('Update "%s" caused error "%s"' % (update, error))
@@ -71,9 +113,9 @@ def main():
     dp = updater.dispatcher
 
     # on different commands - answer in Telegram
-    dp.add_handler(CommandHandler("build", build))
+    dp.add_handler(CommandHandler("build", build, pass_job_queue=True))
     dp.add_handler(CommandHandler("builds", builds))
-    dp.add_handler(CallbackQueryHandler(button))
+    dp.add_handler(CallbackQueryHandler(button, pass_job_queue=True))
 
     # log all errors
     dp.add_error_handler(error)
