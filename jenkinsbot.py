@@ -78,7 +78,7 @@ def checkBuild(bot, job):
             job.schedule_removal()
         else:
             percent = 100. * (time.time()*1000 - info['timestamp']) / info['estimatedDuration']
-            new_msg = "Building: %s\n%d%% [%s]" % (build['name'], percent, '=' * round(percent/10))
+            new_msg = "Building: {}\n{:2d}% `[{: <10}]`".format(build['name'], round(percent), '=' * min(10, round(percent/10)))
 
     except jenkins.NotFoundException:
         new_msg = "Building: %s\nwaiting" % (build['name'])
@@ -87,6 +87,7 @@ def checkBuild(bot, job):
         msg.text = new_msg
 
         bot.editMessageText(text=new_msg,
+                            parse_mode='Markdown',
                             chat_id=msg.chat_id,
                             message_id=msg.message_id)
 
